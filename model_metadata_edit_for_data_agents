@@ -1,0 +1,159 @@
+## Listing all tables in a model w sempy
+import sempy.fabric as fabric
+# Based on this tutorial https://github.com/microsoft/fabric-samples/blob/main/docs-samples/data-science/semantic-link-samples/powerbi_measures_tutorial.ipynb
+# The dataset you want to analyze
+dataset = "Semantic_Model_Name" 
+workspace_id = '' 
+# Let Fabric automatically use the current workspace
+df_tables = fabric.list_tables(dataset, workspace=workspace_id)
+# Display the names of the tables found
+print(df_tables["Name"])
+
+## Extracting metadata
+from datetime import datetime 
+import pandas as pd
+from sempy_labs.tom import connect_semantic_model
+
+current_time = datetime.now()
+
+# 1. DEFINE YOUR PARAMETERS
+workspace = "" ADD ID here
+dataset = "" ADD ID here
+
+# Define a consistent output path and filename
+output_folder_path = "abfss://...."
+output_file_name = f"..._{current_time.strftime('%Y%m%d_%H%M')}.csv"
+full_output_path = f"{output_folder_path}/{output_file_name}"
+
+# This list will hold all the VISIBLE metadata objects we find
+all_metadata = []
+print(f"Connecting to semantic model '{dataset}' to extract metadata...")
+# 2. CONNECT AND EXTRACT
+try:
+    with connect_semantic_model(dataset=dataset, workspace=workspace, readonly=True) as tom:
+        
+        print("-> Connection successful. Extracting visible tables, columns, and measures...")
+        
+        # Iterate through every table in the model
+        for table in tom.model.Tables:
+            
+            # --- FILTER 1: Skip the entire table if it is hidden ---
+            if table.IsHidden:
+                continue # Move to the next table
+
+            # If the table is visible, add its metadata
+            all_metadata.append({
+                "ObjectType": "Table", 
+                "TableName": table.Name, 
+                "ObjectName": None, 
+                "CurrentDescription": table.Description
+            })
+            
+            # Now, iterate through the columns of this visible table
+            for column in table.Columns:
+                # --- FILTER 2: Skip the column if it is hidden ---
+                if not column.IsHidden:
+                    all_metadata.append({
+                        "ObjectType": "Column", 
+                        "TableName": table.Name, 
+                        "ObjectName": column.Name, 
+                        "CurrentDescription": column.Description
+                    })
+                
+            # Finally, iterate through the measures of this visible table
+            for measure in table.Measures:
+                # --- FILTER 3: Skip the measure if it is hidden ---
+                if not measure.IsHidden:
+                    all_metadata.append({
+                        "ObjectType": "Measure", 
+                        "TableName": table.Name, 
+                        "ObjectName": measure.Name, 
+                        "CurrentDescription": measure.Description
+                    })
+
+    print(f"-> Extraction complete. Found {len(all_metadata)} total visible objects.")
+
+    # 3. CREATE AND PREPARE THE PANDAS DATAFRAME
+    df_export = pd.DataFrame(all_metadata)
+    df_export.rename(columns={'ObjectName': 'ColumnName', 'CurrentDescription': 'Description'}, inplace=True)
+    df_export.fillna('', inplace=True)
+    
+    print("\n--- Sample of extracted visible metadata: ---")
+    display(df_export[['ObjectType', 'TableName', 'ColumnName', 'Description']].head())
+
+    # 4. EXPORT TO A SINGLE CSV FILE USING PANDAS
+    df_export.to_csv(full_output_path, index=False)
+    
+    print(f"\n✅ Successfully exported visible metadata to a single file at:\n{full_output_path}")
+
+except Exception as e:
+    print(f"\n❌ A CRITICAL error occurred during extraction: {e}")
+
+####################### SAving it to the model:
+
+## Saving the descriptions to the model
+
+import pandas as pd
+from sempy_labs.tom import connect_semantic_model
+
+# 1. DEFINE YOUR PARAMETERS
+workspace = ""  ##A lot of times, we run this cell without running the previous cell, so not reusing the variables here. 
+dataset = "" 
+
+# Path points to the single, predictable CSV file
+input_folder_path = "abfss://....Files/audit/Semantic_Model_Docs/Export"
+input_file_name = "Correct_filename_for_model.csv" ## select correct file!!!
+updated_file_path = f"{input_folder_path}/{input_file_name}"
+
+
+# 2. LOAD THE COMPLETED CSV FILE
+print(f"Attempting to load the updated CSV file from:\n{updated_file_path}\n")
+try:
+    df_descriptions = pd.read_csv(updated_file_path)
+    df_descriptions.fillna('', inplace=True)
+    
+    print(f"--- Successfully loaded {len(df_descriptions)} descriptions to be applied: ---")
+    display(df_descriptions.head())
+except FileNotFoundError:
+    print(f"❌ ERROR: The file was not found at the specified path. Please run the extraction script first.")
+    raise
+except Exception as e:
+    print(f"❌ ERROR: An unexpected error occurred while reading the CSV file: {e}")
+    raise
+
+
+# 3. THE MAIN PROCESS
+print("\nAttempting to connect to the semantic model in write mode...")
+try:
+    with connect_semantic_model(dataset=dataset, workspace=workspace, readonly=False) as tom:
+        print("-> Connection successful. Starting to apply descriptions...")
+        
+        for row in df_descriptions.itertuples(index=False):
+            try:
+                if not row.Description: continue
+
+                object_type = row.ObjectType
+                table_name = row.TableName
+                object_name = row.ColumnName
+                description = row.Description
+
+                # --- This section already uses correct PascalCase ---
+                if object_type == 'Table':
+                    tom.model.Tables[table_name].Description = description
+                    print(f"   ✅ SUCCESS: Applied description to TABLE '{table_name}'")
+                elif object_type == 'Column':
+                    tom.model.Tables[table_name].Columns[object_name].Description = description
+                    print(f"   ✅ SUCCESS: Applied description to COLUMN '{table_name}[{object_name}]'")
+                elif object_type == 'Measure':
+                    tom.model.Tables[table_name].Measures[object_name].Description = description
+                    print(f"   ✅ SUCCESS: Applied description to MEASURE '{table_name}[{object_name}]'")
+
+            except KeyError:
+                print(f"   ⚠️ SKIPPING ROW due to name mismatch. Table='{row.TableName}', Object='{row.ColumnName}'")
+            except Exception as e:
+                print(f"   ❌ ERROR on row: Table='{row.TableName}', Object='{row.ColumnName}'. Details: {e}")
+
+    print("\n✅ Process complete! All valid changes have been saved to the semantic model.")
+
+except Exception as e:
+    print(f"\n❌ A CRITICAL error occurred and the process was stopped: {e}")
